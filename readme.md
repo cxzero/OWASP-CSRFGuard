@@ -1,4 +1,12 @@
-## OWASP CSRFGuard 3.1.0
+# IMPORTANT NOTICE
+
+We are working on new version of CSRFGuard including a lot of merge request with goood proposals and also a new code to fix known issues on XSS attacks that bypass CSRFGuard.
+
+## Target date for the new relase 4.0 : end of Q2 2020
+
+## We need your help. If you want to give few hours of your time to help us please contact me.
+
+# OWASP CSRFGuard 3.1.0 
 
 [http://www.owasp.org/index.php/Category:OWASP_CSRFGuard_Project](http://www.owasp.org/index.php/Category:OWASP_CSRFGuard_Project)
 
@@ -66,4 +74,14 @@ https://oss.sonatype.org/#nexus-search;gav~~csrfguard~~~
 
 Thanks to Trent Schmidt and Joel Orlina (JIRA)  for there help.
 
+## CSRFGuard integration with a JSF application
 
+Yi SONG create for CSRFGuard project a simple example to demostrate the CSRFGuard integration with a JSF application.
+
+The original JSF project is taken from https://mkyong.com/jsf2/jsf-2-0-hello-world-example/
+
+After integrating with csrfguard, the project has been tested on netbean 8.2 with glassfish 4.1.1
+
+### Yi SONG Bio:
+Yi SONG received my master of engineering in China in 2006. Then I start work for Axalto, then Gemalto  and then Thales till now.
+He has 3 years experience on smartcard development, 10 years experience on cryptography and hardware security module. Since end of 2018, his work is focusing on web application and cloud.

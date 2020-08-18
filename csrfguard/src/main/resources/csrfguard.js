@@ -26,7 +26,13 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+/** Issue 92: boolean check to avoid running the function multiple times.
+ * Happens if the file is included multiple times which results in
+ * Maximum call stack size exceeded**/
+var owaspCSRFGuardScriptHasLoaded = owaspCSRFGuardScriptHasLoaded || {};
+if(owaspCSRFGuardScriptHasLoaded !== true) {
 (function() {
+	owaspCSRFGuardScriptHasLoaded = true;
 	/**
 	 * Code to ensure our event always gets triggered when the DOM is updated.
 	 * @param obj
@@ -76,13 +82,13 @@
 	}();
 	
 	/** string utility functions **/
-	String.prototype.startsWith = function(prefix) {
-		return this.indexOf(prefix) === 0;
-	};
+	function startsWith(s, prefix) {
+		return s.indexOf(prefix) === 0;
+	}
 
-	String.prototype.endsWith = function(suffix) {
-		return this.match(suffix+"$") == suffix;
-	};
+	function endsWith(s, suffix) {
+		return s.substring(s.length - suffix.length) === suffix;
+	}
 
 	/** hook using standards based prototype **/
 	function hijackStandard() {
@@ -192,9 +198,9 @@
 			result = true;
 		} else if(%DOMAIN_STRICT% == false) {
 			if(target.charAt(0) == '.') {
-				result = current.endsWith(target);
+				result = endsWith(current, target);
 			} else {
-				result = current.endsWith('.' + target);
+				result = endsWith(current, '.' + target);
 			}
 		}
 		
@@ -204,7 +210,8 @@
 	/** determine if uri/url points to valid domain **/
 	function isValidUrl(src) {
 		var result = false;
-		
+		var urlStartsWithProtocol = /^[a-zA-Z][a-zA-Z0-9.+-]*:/;
+
 		/** parse out domain to make sure it points to our own **/
 		if(src.substring(0, 7) == "http://" || src.substring(0, 8) == "https://") {
 			var token = "://";
@@ -228,7 +235,7 @@
 		} else if(src.charAt(0) == '#') {
 			result = false;
 			/** ensure it is a local resource without a protocol **/
-		} else if(!src.startsWith("//") && (src.charAt(0) == '/' || src.indexOf(':') == -1)) {
+		} else if(!startsWith(src, "//") && (src.charAt(0) == '/' || src.search(urlStartsWithProtocol) === -1)) {
 			result = true;
 		}
 		
@@ -308,7 +315,7 @@
 	function injectTokenAttribute(element, attr, tokenName, tokenValue, pageTokens) {
 		var location = element.getAttribute(attr);
 		
-		if(location != null && isValidUrl(location)) {
+		if(location != null && isValidUrl(location) && !isUnprotectedExtension(location)) {
 			var uri = parseUri(location);
 			var value = (pageTokens[uri] != null ? pageTokens[uri] : tokenValue);
 			
@@ -325,7 +332,43 @@
 			}
 		}
 	}
-
+	/**
+	 * Added to support isUnprotectedExtension(src)
+	 * @param filename
+	 * @return extension or EMPTY
+	 */
+	function getFileExtension(filename){
+		var rc = '';
+		/* take the part before the ';' if it exists (often for UrlRewriting - ex: ;JSESSIONID=x) */
+		if(filename.indexOf(';')!==-1){
+			filename = filename.split(';')[0];
+		}
+		if(filename.indexOf('.')!==-1){
+			rc = filename.substring(filename.lastIndexOf('.')+1, filename.length) || filename;
+		}
+		return rc;
+	}
+	/**
+	 * get the file extension and match it against a list of known static file extensions
+	 * @param src
+	 * @return
+	 */
+	function isUnprotectedExtension(src){
+		var rc = false;
+		var exts = "%UNPROTECTED_EXTENSIONS%";/* example(for properties): "js,css,gif,png,ico,jpg" */
+		if(exts!==""){
+			var filename = parseUri(src);
+			var ext = getFileExtension(filename).toLowerCase();
+			var e = exts.split(',');
+			for(var i=0;i < e.length;i++){
+				if(e[i]===ext){
+					rc = true;
+					break;
+				}
+			}
+		}
+		return rc;
+	}
 	/** inject csrf prevention tokens throughout dom **/
 	function injectTokens(tokenName, tokenValue) {
 		/** obtain reference to page tokens if enabled **/
@@ -352,6 +395,9 @@
 			if(element.tagName.toLowerCase() == "form") {
 				if(injectForms) {
 					injectTokenForm(element, tokenName, tokenValue, pageTokens,injectGetForms);
+
+					/** adjust array length after addition of new element **/
+					len = all.length;
 				}
 				if (injectFormAttributes) {
 					injectTokenAttribute(element, "action", tokenName, tokenValue, pageTokens);
@@ -409,6 +455,8 @@
 	 * the token hijacking problem.
 	 */
 	if(isValidDomain(document.domain, "%DOMAIN_ORIGIN%")) {
+		var token_name = '%TOKEN_NAME%';
+		var token_value = '%TOKEN_VALUE%';
 		/** optionally include Ajax support **/
 		if(%INJECT_XHR% == true) {
 			if(navigator.appName == "Microsoft Internet Explorer") {
@@ -425,8 +473,8 @@
 		
 		var token_pair = xhr.responseText;
 		token_pair = token_pair.split(":");
-		var token_name = token_pair[0];
-		var token_value = token_pair[1];
+		token_name = token_pair[0];
+		token_value = token_pair[1];
 
 			XMLHttpRequest.prototype.onsend = function(data) {
 				if(isValidUrl(this.url)) {
@@ -445,3 +493,4 @@
 		alert("OWASP CSRFGuard JavaScript was included from within an unauthorized domain!");
 	}
 })();
+}

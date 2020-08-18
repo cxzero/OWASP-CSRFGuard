@@ -28,28 +28,25 @@
  */
 package org.owasp.csrfguard.servlet;
 
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.PrintWriter;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
-import java.util.regex.Pattern;
+import org.owasp.csrfguard.CsrfGuard;
+import org.owasp.csrfguard.CsrfGuardServletContextListener;
+import org.owasp.csrfguard.log.LogLevel;
+import org.owasp.csrfguard.util.CsrfGuardUtils;
+import org.owasp.csrfguard.util.Strings;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
-
-import org.owasp.csrfguard.CsrfGuard;
-import org.owasp.csrfguard.CsrfGuardServletContextListener;
-import org.owasp.csrfguard.log.LogLevel;
-import org.owasp.csrfguard.util.CsrfGuardUtils;
-import org.owasp.csrfguard.util.Streams;
-import org.owasp.csrfguard.util.Strings;
-import org.owasp.csrfguard.util.Writers;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 public final class JavaScriptServlet extends HttpServlet {
 
@@ -81,6 +78,8 @@ public final class JavaScriptServlet extends HttpServlet {
 	
 	private static final String TOKENS_PER_PAGE_IDENTIFIER = "%TOKENS_PER_PAGE%";
 	
+	private static final String UNPROTECTED_EXTENSIONS_IDENTIFIER = "%UNPROTECTED_EXTENSIONS%";
+	
 	private static ServletConfig servletConfig = null;
 
 	public static ServletConfig getStaticServletConfig() {
@@ -107,10 +106,11 @@ public final class JavaScriptServlet extends HttpServlet {
 		}
 			
 		if (refererHeader != null && CsrfGuard.getInstance().isJavascriptRefererMatchDomain()) {
+			boolean isJavascriptRefererMatchProtocol = CsrfGuard.getInstance().isJavascriptRefererMatchProtocol();
 			//this is something like http://something.com/path or https://something.com/path
 			String url = request.getRequestURL().toString();
-			String requestProtocolAndDomain = CsrfGuardUtils.httpProtocolAndDomain(url);
-			String refererProtocolAndDomain = CsrfGuardUtils.httpProtocolAndDomain(refererHeader);
+			String requestProtocolAndDomain = CsrfGuardUtils.httpProtocolAndDomain(url, isJavascriptRefererMatchProtocol);
+			String refererProtocolAndDomain = CsrfGuardUtils.httpProtocolAndDomain(refererHeader, isJavascriptRefererMatchProtocol);
 			if (!refererProtocolAndDomain.equals(requestProtocolAndDomain)) {
 				CsrfGuard.getInstance().getLogger().log(LogLevel.Error, "Referer domain " + refererHeader + " does not match request domain: " + url);
 				hasError = true;
@@ -172,19 +172,7 @@ public final class JavaScriptServlet extends HttpServlet {
 		response.setContentType("text/plain");
 
 		/** write dynamic javascript **/
-		OutputStream output = null;
-		PrintWriter writer = null;
-
-		try {
-			output = response.getOutputStream();
-			writer = new PrintWriter(output);
-
-			writer.write(token_pair);
-			writer.flush();
-		} finally {
-			Writers.close(writer);
-			Streams.close(output);
-		}
+		response.getWriter().write(token_pair);
 	}
 
 
@@ -199,19 +187,7 @@ public final class JavaScriptServlet extends HttpServlet {
 		response.setContentLength(pageTokensString.length());
 
 		/** write dynamic javascript **/
-		OutputStream output = null;
-		PrintWriter writer = null;
-
-		try {
-			output = response.getOutputStream();
-			writer = new PrintWriter(output);
-
-			writer.write(pageTokensString);
-			writer.flush();
-		} finally {
-			Writers.close(writer);
-			Streams.close(output);
-		}
+		response.getWriter().write(pageTokensString);
 	}
 
 	private void writeJavaScript(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -240,6 +216,7 @@ public final class JavaScriptServlet extends HttpServlet {
 		code = code.replace(INJECT_INTO_ATTRIBUTES_IDENTIFIER, Boolean.toString(csrfGuard.isJavascriptInjectIntoAttributes()));
 		code = code.replace(INJECT_INTO_XHR_IDENTIFIER, String.valueOf(csrfGuard.isAjaxEnabled()));
 		code = code.replace(TOKENS_PER_PAGE_IDENTIFIER, String.valueOf(csrfGuard.isTokenPerPageEnabled()));
+		code = code.replace(UNPROTECTED_EXTENSIONS_IDENTIFIER, String.valueOf(csrfGuard.getJavascriptUnprotectedExtensions()));
 		code = code.replace(DOMAIN_ORIGIN_IDENTIFIER, csrfGuard.getDomainOrigin() == null ? CsrfGuardUtils.defaultString(parseDomain(request.getRequestURL())) : csrfGuard.getDomainOrigin());
 		code = code.replace(DOMAIN_STRICT_IDENTIFIER, Boolean.toString(csrfGuard.isJavascriptDomainStrict()));
 		code = code.replace(CONTEXT_PATH_IDENTIFIER, CsrfGuardUtils.defaultString(request.getContextPath()));
@@ -247,19 +224,7 @@ public final class JavaScriptServlet extends HttpServlet {
 		code = code.replace(X_REQUESTED_WITH_IDENTIFIER, CsrfGuardUtils.defaultString(csrfGuard.getJavascriptXrequestedWith()));
 
 		/** write dynamic javascript **/
-		OutputStream output = null;
-		PrintWriter writer = null;
-
-		try {
-			output = response.getOutputStream();
-			writer = new PrintWriter(output);
-
-			writer.write(code);
-			writer.flush();
-		} finally {
-			Writers.close(writer);
-			Streams.close(output);
-		}
+		response.getWriter().write(code);
 	}
 
 	private String parsePageTokens(Map<String, String> pageTokens) {
@@ -284,22 +249,12 @@ public final class JavaScriptServlet extends HttpServlet {
 	
 
 	private String parseDomain(StringBuffer url) {
-		String token = "://";
-		int index = url.indexOf(token);
-		String part = url.substring(index + token.length());
-		StringBuilder domain = new StringBuilder();
-
-		for (int i = 0; i < part.length(); i++) {
-			char character = part.charAt(i);
-
-			if (character == '/' || character == ':') {
-				break;
-			}
-
-			domain.append(character);
+		try {
+			return new URL(url.toString()).getHost();
+		} catch (MalformedURLException e) {
+			//Should not occur. javax.servlet.http.HttpServletRequest.getRequestURL should only returns valid URLs.
+			return "INVALID_URL: " + url.toString();
 		}
-
-		return domain.toString();
 	}
 	
 }

@@ -29,8 +29,6 @@
 package org.owasp.csrfguard;
 
 import java.io.IOException;
-import java.io.OutputStream;
-import java.io.PrintWriter;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.SecureRandom;
@@ -49,20 +47,17 @@ import org.owasp.csrfguard.action.IAction;
 import org.owasp.csrfguard.config.ConfigurationProvider;
 import org.owasp.csrfguard.config.ConfigurationProviderFactory;
 import org.owasp.csrfguard.config.NullConfigurationProvider;
-import org.owasp.csrfguard.config.PropertiesConfigurationProvider;
 import org.owasp.csrfguard.config.PropertiesConfigurationProviderFactory;
 import org.owasp.csrfguard.config.overlay.ExpirableCache;
+import org.owasp.csrfguard.exception.CSRFGuardTokenException;
 import org.owasp.csrfguard.log.ILogger;
 import org.owasp.csrfguard.log.LogLevel;
 import org.owasp.csrfguard.servlet.JavaScriptServlet;
-import org.owasp.csrfguard.util.CsrfGuardUtils;
-import org.owasp.csrfguard.util.RandomGenerator;
-import org.owasp.csrfguard.util.Streams;
-import org.owasp.csrfguard.util.Writers;
+import org.owasp.csrfguard.util.*;
 
 public final class CsrfGuard {
 
-	public final static String PAGE_TOKENS_KEY = "Owasp_CsrfGuard_Pages_Tokens_Key";
+	public static final String PAGE_TOKENS_KEY = "Owasp_CsrfGuard_Pages_Tokens_Key";
 
 	private Properties properties = null;
 
@@ -81,12 +76,7 @@ public final class CsrfGuard {
 		if (configurationProvider == null) {
 
 			synchronized (CsrfGuard.class) {
-				
-				if (configurationProvider == null) {
-					
-					configurationProvider = retrieveNewConfig();
-				}
-				
+				configurationProvider = retrieveNewConfig();
 			}
 		} else if ( !configurationProvider.isCacheable()) {
 			//dont synchronize if not cacheable
@@ -95,6 +85,17 @@ public final class CsrfGuard {
 		
 		
 		return configurationProvider;
+	}
+
+	void generatePageTokensForSession(final HttpSession session) {
+		final Map<String, String> pageTokens = SessionUtils.extractPageTokensFromSession(session);
+		final Set<String> protectedPages = getProtectedPages();
+
+		for (String protectedResource : protectedPages) {
+			pageTokens.put(protectedResource, TokenUtils.getRandomToken());
+		}
+
+		SessionUtils.updatePageTokensOnSession(session, pageTokens);
 	}
 	
 	/**
@@ -130,6 +131,7 @@ public final class CsrfGuard {
 	}
 	
 	public CsrfGuard() {
+		//Empty Constructor
 	}
 
 	public ILogger getLogger() {
@@ -243,6 +245,10 @@ public final class CsrfGuard {
 		return config().isJavascriptDomainStrict();
 	}
 
+	public boolean isJavascriptRefererMatchProtocol() {
+		return config().isJavascriptRefererMatchProtocol();
+	}
+
 	public boolean isJavascriptRefererMatchDomain() {
 		return config().isJavascriptRefererMatchDomain();
 	}
@@ -271,6 +277,10 @@ public final class CsrfGuard {
 		return config().getJavascriptTemplateCode();
 	}
 	
+	public String getJavascriptUnprotectedExtensions() {
+		return config().getJavascriptUnprotectedExtensions();
+	}
+	
 	public String getTokenValue(HttpServletRequest request) {
 		return getTokenValue(request, request.getRequestURI());
 	}
@@ -281,8 +291,8 @@ public final class CsrfGuard {
 
 		if (session != null) {
 			if (isTokenPerPageEnabled()) {
-				@SuppressWarnings("unchecked")
-				Map<String, String> pageTokens = (Map<String, String>) session.getAttribute(CsrfGuard.PAGE_TOKENS_KEY);
+
+				Map<String, String> pageTokens = SessionUtils.extractPageTokensFromSession(session);
 
 				if (pageTokens != null) {
 					if (isTokenPerPagePrecreate()) {
@@ -308,19 +318,13 @@ public final class CsrfGuard {
 
 		if (!valid){
 		    /** print log message - page and method are protected **/
-		    getLogger().log(String.format("CsrfGuard analyzing request %s", request.getRequestURI()));
+		    getLogger().log(String.format("CSRFGuard analyzing request %s", request.getRequestURI()));
 		}
 		
 		/** sending request to protected resource - verify token **/
 		if (tokenFromSession != null && !valid) {
 			try {
-				if (isAjaxEnabled() && isAjaxRequest(request)) {
-					verifyAjaxToken(request);
-				} else if (isTokenPerPageEnabled()) {
-					verifyPageToken(request);
-				} else {
-					verifySessionToken(request);
-				}
+				verifyToken(request);
 				valid = true;
 			} catch (CsrfGuardException csrfe) {
 				callActionsOnError(request, response, csrfe);
@@ -333,16 +337,30 @@ public final class CsrfGuard {
 			/** expected token in session - bad state and not valid **/
 		} else if (tokenFromSession == null && !valid) {
 			try {
-				throw new CsrfGuardException("CsrfGuard expects the token to exist in session at this point");
+				throw new CsrfGuardException(MessageConstants.SESSION_TOKEN_MSG);
 			} catch (CsrfGuardException csrfe) {
 				callActionsOnError(request, response, csrfe);
-				
 			}
 		} else {
 			/** unprotected page - nothing to do **/
 		}
-
 		return valid;
+	}
+
+	/**
+	 * Verify the token based on the type - ex: page, session or ajax
+	 *
+	 * @param request - HttpRequest
+	 * @throws CsrfGuardException - Exception
+	 */
+	private void verifyToken(HttpServletRequest request) throws CsrfGuardException {
+		if (isAjaxEnabled() && isAjaxRequest(request)) {
+			verifyAjaxToken(request);
+		} else if (isTokenPerPageEnabled()) {
+			verifyPageToken(request);
+		} else {
+			verifySessionToken(request);
+		}
 	}
 
 	/**
@@ -372,7 +390,8 @@ public final class CsrfGuard {
 			try {
 				tokenValue = RandomGenerator.generateRandomId(getPrng(), getTokenLength());
 			} catch (Exception e) {
-				throw new RuntimeException(String.format("unable to generate the random token - %s", e.getLocalizedMessage()), e);
+				String errorLiteral = MessageConstants.RANDOM_TOKEN_FAILURE_MSG + " - " + "%s";
+				throw new CSRFGuardTokenException(String.format(errorLiteral, e.getLocalizedMessage()), e);
 			}
 
 			session.setAttribute(getSessionKey(), tokenValue);
@@ -389,8 +408,8 @@ public final class CsrfGuard {
 			
 			/** create page specific token **/
 			if (isTokenPerPageEnabled()) {
-				@SuppressWarnings("unchecked")
-				Map<String, String> pageTokens = (Map<String, String>) session.getAttribute(CsrfGuard.PAGE_TOKENS_KEY);
+
+				Map<String, String> pageTokens = SessionUtils.extractPageTokensFromSession(session);
 
 				/** first time initialization **/
 				if (pageTokens == null) {
@@ -422,7 +441,8 @@ public final class CsrfGuard {
 		try {
 			pageTokens.put(uri, RandomGenerator.generateRandomId(getPrng(), getTokenLength()));
 		} catch (Exception e) {
-			throw new RuntimeException(String.format("unable to generate the random token - %s", e.getLocalizedMessage()), e);
+			String errorLiteral = MessageConstants.RANDOM_TOKEN_FAILURE_MSG + " - " + "%s";
+			throw new CSRFGuardTokenException(String.format(errorLiteral, e.getLocalizedMessage()), e);
 		}
 	}
 
@@ -480,19 +500,7 @@ public final class CsrfGuard {
 		response.setContentLength(code.length());
 
 		/** write auto posting form **/
-		OutputStream output = null;
-		PrintWriter writer = null;
-
-		try {
-			output = response.getOutputStream();
-			writer = new PrintWriter(output);
-
-			writer.write(code);
-			writer.flush();
-		} finally {
-			Writers.close(writer);
-			Streams.close(output);
-		}
+		response.getWriter().write(code);
 	}
 
 	@Override
@@ -515,7 +523,9 @@ public final class CsrfGuard {
 		sb.append(String.format("* Javascript inject attributes: %s\r\n", isJavascriptInjectIntoAttributes()));
 		sb.append(String.format("* Javascript inject forms: %s\r\n", isJavascriptInjectIntoForms()));
 		sb.append(String.format("* Javascript referer pattern: %s\r\n", getJavascriptRefererPattern()));
+		sb.append(String.format("* Javascript referer match protocol: %s\r\n", isJavascriptRefererMatchProtocol()));
 		sb.append(String.format("* Javascript referer match domain: %s\r\n", isJavascriptRefererMatchDomain()));
+		sb.append(String.format("* Javascript unprotected extensions: %s\r\n", getJavascriptUnprotectedExtensions()));
 		sb.append(String.format("* Javascript source file: %s\r\n", getJavascriptSourceFile()));
 		sb.append(String.format("* Javascript X requested with: %s\r\n", getJavascriptXrequestedWith()));
 		sb.append(String.format("* Protected methods: %s\r\n", CsrfGuardUtils.toStringForLog(getProtectedMethods())));
@@ -540,8 +550,18 @@ public final class CsrfGuard {
 		return sb.toString();
 	}
 
-	private boolean isAjaxRequest(HttpServletRequest request) {
-		return request.getHeader("X-Requested-With") != null;
+	private boolean isAjaxRequest(final HttpServletRequest request) {
+		final String header = request.getHeader("X-Requested-With");
+		if (header == null) {
+			return false;
+		}
+		final String[] headers = header.split(",");
+		for (final String requestedWithHeader: headers) {
+			if ("XMLHttpRequest".equals(requestedWithHeader.trim())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private void verifyAjaxToken(HttpServletRequest request) throws CsrfGuardException {
@@ -551,7 +571,7 @@ public final class CsrfGuard {
 
 		if (tokenFromRequest == null) {
 			/** FAIL: token is missing from the request **/
-			throw new CsrfGuardException("required token is missing from the request");
+			throw new CsrfGuardException(MessageConstants.MISSING_TOKEN_MSG);
 		} else {
 			//if there are two headers, then the result is comma separated
 			if (!tokenFromSession.equals(tokenFromRequest)) {
@@ -560,16 +580,16 @@ public final class CsrfGuard {
 				}
 				if (!tokenFromSession.equals(tokenFromRequest)) {
 					/** FAIL: the request token does not match the session token **/
-					throw new CsrfGuardException("request token does not match session token");
+					throw new CsrfGuardException(MessageConstants.MISSING_TOKEN_MSG);
 				}
 			}
 		}
 	}
 
 	private void verifyPageToken(HttpServletRequest request) throws CsrfGuardException {
+
 		HttpSession session = request.getSession(true);
-		@SuppressWarnings("unchecked")
-		Map<String, String> pageTokens = (Map<String, String>) session.getAttribute(CsrfGuard.PAGE_TOKENS_KEY);
+		Map<String, String> pageTokens = SessionUtils.extractPageTokensFromSession(session);
 
 		String tokenFromPages = (pageTokens != null ? pageTokens.get(request.getRequestURI()) : null);
 		String tokenFromSession = (String) session.getAttribute(getSessionKey());
@@ -577,15 +597,17 @@ public final class CsrfGuard {
 
 		if (tokenFromRequest == null) {
 			/** FAIL: token is missing from the request **/
-			throw new CsrfGuardException("required token is missing from the request");
+			throw new CsrfGuardException(MessageConstants.MISSING_TOKEN_MSG);
 		} else if (tokenFromPages != null) {
 			if (!tokenFromPages.equals(tokenFromRequest)) {
 				/** FAIL: request does not match page token **/
-				throw new CsrfGuardException("request token does not match page token");
+				SessionUtils.invalidateTokenForResource(session, tokenFromPages, tokenFromRequest);
+				throw new CsrfGuardException(MessageConstants.MISMATCH_PAGE_TOKEN_MSG);
 			}
 		} else if (!tokenFromSession.equals(tokenFromRequest)) {
 			/** FAIL: the request token does not match the session token **/
-			throw new CsrfGuardException("request token does not match session token");
+			SessionUtils.invalidateSessionToken(session);
+			throw new CsrfGuardException(MessageConstants.MISMATCH_SESSION_TOKEN_MSG);
 		}
 	}
 
@@ -596,10 +618,11 @@ public final class CsrfGuard {
 
 		if (tokenFromRequest == null) {
 			/** FAIL: token is missing from the request **/
-			throw new CsrfGuardException("required token is missing from the request");
+			throw new CsrfGuardException(MessageConstants.MISSING_TOKEN_MSG);
 		} else if (!tokenFromSession.equals(tokenFromRequest)) {
 			/** FAIL: the request token does not match the session token **/
-			throw new CsrfGuardException("request token does not match session token");
+			SessionUtils.invalidateSessionToken(session);
+			throw new CsrfGuardException(MessageConstants.MISMATCH_SESSION_TOKEN_MSG);
 		}
 	}
 
@@ -607,25 +630,27 @@ public final class CsrfGuard {
 		HttpSession session = request.getSession(true);
 
 		/** rotate master token **/
-		String tokenFromSession = null;
+		String tokenFromSession;
 
 		try {
 			tokenFromSession = RandomGenerator.generateRandomId(getPrng(), getTokenLength());
 		} catch (Exception e) {
-			throw new RuntimeException(String.format("unable to generate the random token - %s", e.getLocalizedMessage()), e);
+			String errorLiteral = MessageConstants.RANDOM_TOKEN_FAILURE_MSG + " - " + "%s";
+			throw new CSRFGuardTokenException(String.format(errorLiteral, e.getLocalizedMessage()), e);
 		}
 
 		session.setAttribute(getSessionKey(), tokenFromSession);
 
 		/** rotate page token **/
 		if (isTokenPerPageEnabled()) {
-			@SuppressWarnings("unchecked")
-			Map<String, String> pageTokens = (Map<String, String>) session.getAttribute(CsrfGuard.PAGE_TOKENS_KEY);
+
+			Map<String, String> pageTokens = SessionUtils.extractPageTokensFromSession(session);
 
 			try {
 				pageTokens.put(request.getRequestURI(), RandomGenerator.generateRandomId(getPrng(), getTokenLength()));
 			} catch (Exception e) {
-				throw new RuntimeException(String.format("unable to generate the random token - %s", e.getLocalizedMessage()), e);
+				String errorLiteral = MessageConstants.RANDOM_TOKEN_FAILURE_MSG + " - " + "%s";
+				throw new CSRFGuardTokenException(String.format(errorLiteral, e.getLocalizedMessage()), e);
 			}
 		}
 	}
@@ -709,7 +734,7 @@ public final class CsrfGuard {
 	private boolean isUriMatch(String testPath, String requestPath) {
 
 		//case 4, if it is a regex
-		if (isTestPathRegex(testPath)) {
+		if (RegexValidationUtil.isTestPathRegex(testPath)) {
 			
 			Pattern pattern = this.regexPatternCache.get(testPath);
 			if (pattern == null) {
@@ -732,47 +757,38 @@ public final class CsrfGuard {
 		if (testPath.equals("/*")) {
 			retval = true;
 		}
-		if (testPath.endsWith("/*")) {
-			if (testPath
-					.regionMatches(0, requestPath, 0, testPath.length() - 2)) {
-				if (requestPath.length() == (testPath.length() - 2)) {
-					retval = true;
-				} else if ('/' == requestPath.charAt(testPath.length() - 2)) {
-					retval = true;
-				}
-			}
+
+		if (testPath.endsWith("/*") &&
+				(testPath.regionMatches(0, requestPath, 0, testPath.length() - 2)
+						&& (requestPath.length() == (testPath.length() - 2)
+						|| '/' == requestPath.charAt(testPath.length() - 2)))) {
+			retval = true;
 		}
 
 		/** Case 3 - Extension Match **/
-		if (testPath.startsWith("*.")) {
+		retval = validateExtensionMatch(testPath, requestPath, retval);
+
+		return retval;
+	}
+
+	private boolean validateExtensionMatch(String testPath, String requestPath, boolean retval) {
+		if (testPath != null && testPath.startsWith("*.")) {
 			int slash = requestPath.lastIndexOf('/');
 			int period = requestPath.lastIndexOf('.');
 
-			if ((slash >= 0)
-					&& (period > slash)
-					&& (period != requestPath.length() - 1)
+			if ((slash >= 0) && (period > slash) && (period != requestPath.length() - 1)
 					&& ((requestPath.length() - period) == (testPath.length() - 1))) {
 				retval = testPath.regionMatches(2, requestPath, period + 1,
 						testPath.length() - 2);
 			}
 		}
-
 		return retval;
 	}
 
-	/**
-	 * see if a test path starts with ^ and ends with $ thus making it a regex
-	 * @param testPath The path string to test
-	 * @return true if regex (starts with "^" and ends with "$")
-	 */
-	private static boolean isTestPathRegex(String testPath) {
-		return testPath != null && testPath.startsWith("^") && testPath.endsWith("$");
-	}
-	
 	private boolean isUriExactMatch(String testPath, String requestPath) {
 		
 		//cant be an exact match if this is a regex
-		if (isTestPathRegex(testPath)) {
+		if (RegexValidationUtil.isTestPathRegex(testPath)) {
 			return false;
 		}
 		
